@@ -1,0 +1,18 @@
+# destinations.yaml — Configuración de destinos del clasificador
+#
+# El sistema lee el QR del paquete y usa el número del QR como destino directo.
+# Ejemplo: paquete con QR "1" o "QR1" → robot va al agujero 1.
+#
+# valid_holes: lista de agujeros físicos existentes en el robot.
+#   Si el QR tiene un número fuera de esta lista, el ciclo termina en error.
+#   Dejar vacío ([]) para aceptar cualquier número.
+#
+# overrides: mapeos manuales opcionales que tienen prioridad sobre el QR.
+#   Útil si un QR tiene texto personalizado en vez de un número.
+
+valid_holes: [1, 2, 3]
+
+overrides: {}
+# Ejemplo de overrides:
+#   fragil: 1
+#   urgente: 2

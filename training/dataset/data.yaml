@@ -1,0 +1,14 @@
+# data.yaml — Configuración del dataset para YOLOv8
+# Editar 'names' con las clases reales de tu dataset.
+# LabelImg o Roboflow generan este archivo automáticamente.
+
+path: .          # directorio raíz del dataset (relativo a este archivo)
+train: images/train
+val: images/val
+
+# Número de clases y sus nombres (deben coincidir con los labels .txt)
+nc: 3
+names:
+  0: tipo_A
+  1: tipo_B
+  2: tipo_C

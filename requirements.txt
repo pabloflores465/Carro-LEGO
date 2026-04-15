@@ -1,0 +1,15 @@
+# PC de la estación y orquestador
+opencv-python>=4.8     # captura de cámara y lector QR integrado
+pyzbar>=0.1.9          # lector QR más robusto (requiere libzbar del SO)
+paho-mqtt>=1.6
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pyyaml>=6.0
+nxt-python>=3.3        # control del NXT por USB desde la PC
+qrcode>=7.4            # generación de imágenes QR
+pillow>=10.0           # requerido por qrcode para guardar imágenes
+
+# Instalar libzbar en el sistema operativo:
+#   macOS:  brew install zbar
+#   Linux:  sudo apt install libzbar0
+#   Windows: no se requiere paso extra
