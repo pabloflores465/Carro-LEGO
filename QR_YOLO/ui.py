@@ -66,6 +66,9 @@ class QRRobotUI:
         # Variables de estado
         self._cam_status_var   = tk.StringVar(value="Inactiva")
         self._cam_index_var    = tk.IntVar(value=int(self.config.get_nav("camera_index") or 1))
+        self._heading_offset_var = tk.DoubleVar(
+            value=float(self.config.get_nav("heading_offset_deg") or 0)
+        )
         self._detected_qr_var  = tk.StringVar(value="—")
         self._dest_qr_var      = tk.StringVar(value="—")
         self._nav_state_var    = tk.StringVar(value="—")
@@ -215,6 +218,22 @@ class QRRobotUI:
         )
         self._cam_index_spin.pack(side="left", padx=4)
 
+        # Heading offset — calibración de desviación angular
+        cam_idx_frame2 = ttk.Frame(cam_lf)
+        cam_idx_frame2.pack(fill="x", padx=4, pady=2)
+        ttk.Label(cam_idx_frame2, text="Heading offset°:").pack(side="left")
+        self._heading_offset_spin = ttk.Spinbox(
+            cam_idx_frame2, from_=-180, to=180, increment=5, width=6,
+            textvariable=self._heading_offset_var,
+        )
+        self._heading_offset_spin.pack(side="left", padx=4)
+        ttk.Label(
+            cam_idx_frame2,
+            text="← desvía izq  |  desvía der →",
+            font=("Helvetica", 8),
+            foreground="#999",
+        ).pack(side="left")
+
         self._preview_lbl = ttk.Label(cam_lf)
         self._preview_lbl.pack()
         self._show_placeholder()
@@ -347,6 +366,7 @@ class QRRobotUI:
         try:
             cam_idx = int(self._cam_index_var.get())
             self.config.nav_config["camera_index"] = cam_idx
+            self.config.nav_config["heading_offset_deg"] = float(self._heading_offset_var.get())
             self.config.save_nav_config()
             self._camera   = Camera(index=cam_idx)
             self._detector = QRDetector()

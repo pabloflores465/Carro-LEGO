@@ -52,6 +52,7 @@ class NavigationConfig:
     search_power: int         = 25     # potencia durante búsqueda giratoria
     steer_gain: float         = 0.5    # 0=recto siempre, 1=máxima corrección; ajustar si gira mucho
     steer_invert: int         = 1      # 1=normal, -1=invertir si los motores están al revés
+    heading_offset_deg: float = 0      # compensación angular al heading del QR (grados)
     lost_debounce: int        = 6      # frames sin ver algún QR antes de activar búsqueda
     arrival_debounce: int     = 4      # frames consecutivos cerca para confirmar llegada
     return_after_delivery: bool = True
@@ -202,10 +203,9 @@ class Navigator:
             if dist <= self.config.arrival_px:
                 arrival_streak += 1
                 if arrival_streak < self.config.arrival_debounce:
-                    self.robot.steer(
-                        self.config.advance_power // 2,
-                        self.config.advance_power // 2,
-                    )
+                    # Avanzar lento mientras confirma llegada
+                    slow_p = max(20, self.config.advance_power // 3)
+                    self.robot.steer(slow_p, slow_p)
                     time.sleep(0.05)
                     continue
 
@@ -231,30 +231,30 @@ class Navigator:
 
             arrival_streak = 0
 
-            # ── Calcular ángulo de corrección ─────────────────────────────────
+            # ── Control proporcional: dx relativo como error lateral ─────────
             #
-            # angle_to_target: ángulo del vector robot→destino en el frame.
-            # robot_heading:   dirección "adelante" del robot, calculada desde
-            #                  las esquinas del QR del robot (polígono pyzbar).
+            # No dependemos del heading del QR (impreciso por polígono pyzbar).
+            # En su lugar usamos control proporcional sobre la posición relativa
+            # del target respecto al robot en el frame cenital:
             #
-            # Si no hay polígono disponible (cv2 fallback), usamos solo dx
-            # como proxy del error lateral — menos preciso pero funcional.
+            #   dx > 0  →  target a la derecha  →  curvar derecha
+            #   dx < 0  →  target a la izquierda →  curvar izquierda
             #
-            angle_to_target = math.atan2(dy, dx)
-            robot_heading   = _qr_heading(robot_det)
+            # La magnitud de la corrección se escala con la distancia:
+            #   - lejos  → corrección fuerte
+            #   - cerca  → corrección fina (evita oscilación)
+            #
+            lateral_error = dx / max(dist, 1)        # normalizado a [-1, +1]
 
-            if robot_heading is not None:
-                # Ángulo que el robot tiene que girar: positivo=derecha, negativo=izquierda
-                angle_err = _angle_diff(angle_to_target, robot_heading)
-            else:
-                # Sin orientación: usar solo la componente lateral (dx normalizado)
-                angle_err = math.atan2(dx, max(abs(dy), 1)) * self.config.steer_invert
+            # Gain adaptativo: más agresivo lejos, más suave cerca
+            dist_ratio = min(1.0, dist / 400)         # 1.0 lejos, ~0.3 cerca
+            adaptive_gain = self.config.steer_gain * (0.4 + 0.6 * dist_ratio)
 
-            # Convertir a steering [-1, +1] y aplicar gain.
-            # Negamos angle_err para coincidir con la convención del fallback:
-            #   dx > 0 (target a la derecha) → steering positivo → gira derecha
-            #   dx < 0 (target a la izquierda) → steering negativo → gira izquierda
-            steering = (-angle_err / math.pi) * self.config.steer_gain * self.config.steer_invert
+            steering = lateral_error * adaptive_gain * self.config.steer_invert
+
+            # Clamp steering para evitar giros bruscos
+            max_steer = 0.4                           # máximo 40% diferencial
+            steering = max(-max_steer, min(max_steer, steering))
 
             base  = self.config.advance_power
             min_p = self.config.min_power
@@ -263,8 +263,8 @@ class Navigator:
 
             self._set_state(NavState.ADVANCING)
             log.debug(
-                "dist=%.0fpx  angle_err=%+.0f°  steering=%+.2f  L=%d R=%d",
-                dist, math.degrees(angle_err), steering, left_p, right_p,
+                "dist=%.0fpx  lateral=%+.2f  gain=%.2f  steer=%+.2f  L=%d R=%d",
+                dist, lateral_error, adaptive_gain, steering, left_p, right_p,
             )
 
             # B=rueda derecha recibe right_p, C=rueda izquierda recibe left_p
