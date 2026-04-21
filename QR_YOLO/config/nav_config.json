@@ -1,0 +1,13 @@
+{
+  "arrival_px": 120,
+  "advance_power": 55,
+  "min_power": 30,
+  "search_power": 25,
+  "steer_gain": 0.5,
+  "steer_invert": -1,
+  "lost_debounce": 6,
+  "arrival_debounce": 4,
+  "return_after_delivery": true,
+  "tilt_degrees": 45,
+  "tilt_power": 60
+}

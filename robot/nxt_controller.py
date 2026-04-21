@@ -73,6 +73,9 @@ WHEEL_DIR = 1
 # Dirección de la plataforma. Si inclina al lado equivocado, cambia a -1.
 TILT_DIR = -1
 
+# Distancia (cm) por debajo de la cual se considera que hay un obstáculo.
+OBSTACLE_THRESHOLD_CM = 20
+
 
 def load_calibration() -> dict:
     """Lee config/calibration.yaml y retorna los parámetros actuales."""
@@ -91,6 +94,10 @@ def load_calibration() -> dict:
 
 class _MockBrick:
     pass
+
+class _MockSensor:
+    def get_sample(self):
+        return 255  # sin obstáculo en simulación
 
 class _MockMotor:
     def __init__(self, name):
@@ -153,13 +160,17 @@ class NXTController:
             self.motor_tilt  = _MockMotor("A")   # plataforma (objetos)
             self.motor_left  = _MockMotor("B")   # rueda izquierda
             self.motor_right = _MockMotor("C")   # rueda derecha
+            self.sensor_prox = _MockSensor()     # sensor de proximidad S1
         else:
             import nxt.locator
             import nxt.motor
+            import nxt.sensor
+            import nxt.sensor.generic
             self._brick = nxt.locator.find()
             self.motor_tilt  = nxt.motor.Motor(self._brick, nxt.motor.Port.A)  # plataforma
             self.motor_left  = nxt.motor.Motor(self._brick, nxt.motor.Port.B)  # rueda izquierda
             self.motor_right = nxt.motor.Motor(self._brick, nxt.motor.Port.C)  # rueda derecha
+            self.sensor_prox = nxt.sensor.generic.Ultrasonic(self._brick, nxt.sensor.Port.S1, check_compatible=False)
             log.info("NXT conectado por USB.")
 
     # ── API pública ───────────────────────────────────────────────────────────
@@ -210,6 +221,9 @@ class NXTController:
         timeout_count = 0
 
         while True:
+            if self._wait_while_blocked(cfg["advance_power"]):
+                on_top = 0   # pausa por obstáculo no cuenta como "encima del QR"
+
             count = self._count_qr(target_qr)
 
             if count >= 1:
@@ -278,6 +292,29 @@ class NXTController:
         """Inclina o restablece el Motor A (plataforma de objetos)."""
         direction = TILT_DIR * (power if degrees > 0 else -power)
         self.motor_tilt.turn(direction, abs(degrees), brake=True)
+
+    def _is_blocked(self) -> bool:
+        """Retorna True si el sensor de proximidad (S1) detecta un obstáculo cercano."""
+        try:
+            dist = self.sensor_prox.get_sample()
+            return dist < OBSTACLE_THRESHOLD_CM
+        except Exception as e:
+            log.warning(f"Error leyendo sensor de proximidad: {e}")
+            return False
+
+    def _wait_while_blocked(self, power: int) -> bool:
+        """Para los motores mientras haya obstáculo y los reanuda al despejarse.
+        Retorna True si hubo una pausa real (para que el llamador resetee contadores)."""
+        if not self._is_blocked():
+            return False
+        self._motors_brake()
+        sys.stdout.write("\n")
+        log.warning(f"  {_YELLOW}⚠ OBSTÁCULO DETECTADO{_R} — esperando...")
+        while self._is_blocked():
+            time.sleep(0.1)
+        log.info(f"  {_GREEN}✓ Camino despejado{_R} — reanudando")
+        self._motors_run(power)
+        return True
 
     def _count_qr(self, target_qr: str) -> int:
         """

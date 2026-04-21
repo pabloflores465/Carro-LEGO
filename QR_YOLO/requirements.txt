@@ -1,0 +1,28 @@
+# ── Visión por computadora ──────────────────────────────────────────────────
+opencv-python>=4.8        # captura de cámara, procesamiento de imagen
+pyzbar>=0.1.9             # decodificador QR (requiere libzbar en el SO)
+                          # macOS:  brew install zbar
+                          # Linux:  sudo apt install libzbar0
+
+# ── Generación de QR ────────────────────────────────────────────────────────
+qrcode>=7.4
+pillow>=10.0              # requerido por qrcode y por la UI Tkinter
+
+# ── YOLO (obligatorio) ──────────────────────────────────────────────────────
+# YOLO localiza la región del QR en el frame (bounding box).
+# pyzbar decodifica el contenido del recorte. Son complementarios:
+# YOLO no puede leer bits de QR; pyzbar no localiza en escenas complejas.
+# yolov8n.pt se descarga automáticamente la primera vez (~6 MB).
+# Para mejor precisión: entrena un modelo QR y colócalo en models/qr_detector.pt
+ultralytics>=8.0
+
+# ── Control del NXT ─────────────────────────────────────────────────────────
+nxt-python>=3.3           # control del NXT por USB desde la PC (sin instalar en el brick)
+
+# ── Config ───────────────────────────────────────────────────────────────────
+pyyaml>=6.0
+
+# ── Nota de instalación ─────────────────────────────────────────────────────
+# 1. brew install zbar          (macOS — necesario para pyzbar)
+# 2. source venv/bin/activate
+# 3. pip install -r requirements.txt
