@@ -250,8 +250,11 @@ class Navigator:
                 # Sin orientación: usar solo la componente lateral (dx normalizado)
                 angle_err = math.atan2(dx, max(abs(dy), 1)) * self.config.steer_invert
 
-            # Convertir a steering [-1, +1] y aplicar gain
-            steering = (angle_err / math.pi) * self.config.steer_gain * self.config.steer_invert
+            # Convertir a steering [-1, +1] y aplicar gain.
+            # Negamos angle_err para coincidir con la convención del fallback:
+            #   dx > 0 (target a la derecha) → steering positivo → gira derecha
+            #   dx < 0 (target a la izquierda) → steering negativo → gira izquierda
+            steering = (-angle_err / math.pi) * self.config.steer_gain * self.config.steer_invert
 
             base  = self.config.advance_power
             min_p = self.config.min_power

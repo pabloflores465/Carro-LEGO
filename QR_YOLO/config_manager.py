@@ -31,6 +31,7 @@ DEFAULT_ASSOCIATIONS: Dict[str, str] = {
 
 DEFAULT_NAV: Dict = {
     # ── Cámara cenital: navegación por posición relativa robot↔destino ──────
+    "camera_index": 1,       # índice de la cámara (0=built-in, 1=USB, etc.)
     "arrival_px": 120,       # distancia en píxeles robot→destino para considerar llegada
     "advance_power": 55,     # potencia base (0-100)
     "min_power": 30,         # potencia mínima de la rueda interior (evita parada total)

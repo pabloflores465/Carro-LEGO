@@ -65,6 +65,7 @@ class QRRobotUI:
 
         # Variables de estado
         self._cam_status_var   = tk.StringVar(value="Inactiva")
+        self._cam_index_var    = tk.IntVar(value=int(self.config.get_nav("camera_index") or 1))
         self._detected_qr_var  = tk.StringVar(value="—")
         self._dest_qr_var      = tk.StringVar(value="—")
         self._nav_state_var    = tk.StringVar(value="—")
@@ -203,6 +204,17 @@ class QRRobotUI:
         # Cámara preview
         cam_lf = ttk.LabelFrame(parent, text="Vista de cámara", padding=4)
         cam_lf.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        # Selector de índice de cámara
+        cam_idx_frame = ttk.Frame(cam_lf)
+        cam_idx_frame.pack(fill="x", padx=4, pady=2)
+        ttk.Label(cam_idx_frame, text="Índice:").pack(side="left")
+        self._cam_index_spin = ttk.Spinbox(
+            cam_idx_frame, from_=0, to=9, width=4,
+            textvariable=self._cam_index_var,
+        )
+        self._cam_index_spin.pack(side="left", padx=4)
+
         self._preview_lbl = ttk.Label(cam_lf)
         self._preview_lbl.pack()
         self._show_placeholder()
@@ -333,7 +345,10 @@ class QRRobotUI:
         if self._camera_running:
             return
         try:
-            self._camera   = Camera(index=1)
+            cam_idx = int(self._cam_index_var.get())
+            self.config.nav_config["camera_index"] = cam_idx
+            self.config.save_nav_config()
+            self._camera   = Camera(index=cam_idx)
             self._detector = QRDetector()
             self._camera_running = True
             self.set_camera_status(True)
