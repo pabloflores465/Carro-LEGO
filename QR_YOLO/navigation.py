@@ -270,12 +270,12 @@ class Navigator:
                 # Limpiar historial: posiciones anteriores ya no son válidas
                 self._positions = []
                 self._heading = None
-                # Giro en sitio: diferencial opuesto
-                p = self.config.search_power
+                # Giro en sitio: diferencial opuesto con más potencia
+                p = max(self.config.search_power, 40)
                 self.robot.steer(p, -p)
-                time.sleep(0.15)
+                time.sleep(0.12)
                 self.robot.stop()
-                time.sleep(0.10)
+                time.sleep(0.08)
                 continue
 
             # ── QR visible: resetear contadores ───────────────────────────────
@@ -337,57 +337,63 @@ class Navigator:
             # ── Calcular error angular ────────────────────────────────────────
             angle_err = _angle_diff(angle_to_target, self._heading)
             angle_err_deg = math.degrees(angle_err)
+            abs_err = abs(angle_err)
 
-            # ── Estrategia dual ───────────────────────────────────────────────
-            # Si el error es grande (> 60°): girar en sitio hasta alinear.
-            # Steering mientras avanza no corrige errores grandes porque el
-            # robot físicamente avanza en la dirección equivocada.
-            TURN_THRESHOLD = math.radians(60)
-
-            if abs(angle_err) > TURN_THRESHOLD:
-                # Giro en sitio hacia el target
-                self._set_state(NavState.ADVANCING)
-                turn_power = self.config.advance_power
+            # ── Estrategia de 3 niveles ───────────────────────────────────────
+            # El robot rota ~40°/s con power=55. Necesitamos ser más agresivos
+            # para alinear antes de perder QR.
+            #
+            # Nivel 1: error > 90° → giro agresivo en sitio (power 85)
+            # Nivel 2: error 30-90° → avanzar + girar con corrección fuerte
+            # Nivel 3: error < 30° → avanzar con corrección suave
+            #
+            if abs_err > math.radians(90):
+                # Giro agresivo en sitio
+                turn_power = 85
                 if angle_err > 0:
-                    # Target a la derecha → girar derecha
                     self.robot.steer(turn_power, -turn_power)
-                    direction = "GIRAR DERECHA"
                 else:
-                    # Target a la izquierda → girar izquierda
                     self.robot.steer(-turn_power, turn_power)
-                    direction = "GIRAR IZQUIERDA"
+                mode = "GIRO"
 
-                log.info(
-                    "[%s] robot=(%d,%d) target=(%d,%d) dist=%.0fpx%s "
-                    "| heading=%+.0f° tgt=%+.0f° err=%+.1f° | %s",
-                    self._state.name,
-                    rx, ry, target_det.center_x, target_det.center_y, dist, proximity,
-                    math.degrees(self._heading), math.degrees(angle_to_target),
-                    angle_err_deg, direction,
-                )
-                time.sleep(0.05)
+            elif abs_err > math.radians(30):
+                # Avanzar mientras gira: corrección fuerte pero sin perder avance
+                steer_amount = min(0.6, (abs_err / math.pi) * 1.2)
+                if angle_err > 0:
+                    # Derecha: rueda izq más rápida
+                    left_p = self.config.advance_power
+                    right_p = max(20, int(self.config.advance_power * (1.0 - steer_amount)))
+                else:
+                    # Izquierda: rueda der más rápida
+                    right_p = self.config.advance_power
+                    left_p = max(20, int(self.config.advance_power * (1.0 - steer_amount)))
+                self.robot.steer(left_p, right_p)
+                mode = "CURVA"
+
             else:
-                # Error pequeño: avanzar con corrección diferencial suave
+                # Error pequeño: avance suave con corrección mínima
                 dist_ratio = min(1.0, dist / 400)
                 adaptive_gain = self.config.steer_gain * (0.3 + 0.7 * dist_ratio)
                 steering = (angle_err / math.pi) * adaptive_gain * self.config.steer_invert
-                steering = max(-0.3, min(0.3, steering))  # clamp suave
+                steering = max(-0.2, min(0.2, steering))
 
                 base = self.config.advance_power
                 min_p = self.config.min_power
                 left_p  = max(min_p, min(100, int(base * (1.0 + steering))))
                 right_p = max(min_p, min(100, int(base * (1.0 - steering))))
-
-                self._set_state(NavState.ADVANCING)
-                log.info(
-                    "[AVANZAR] robot=(%d,%d) target=(%d,%d) dist=%.0fpx%s "
-                    "| heading=%+.0f° tgt=%+.0f° err=%+.1f° steer=%.3f L=%d R=%d",
-                    rx, ry, target_det.center_x, target_det.center_y, dist, proximity,
-                    math.degrees(self._heading), math.degrees(angle_to_target),
-                    angle_err_deg, steering, left_p, right_p,
-                )
                 self.robot.steer(left_p, right_p)
-                time.sleep(0.05)
+                mode = "RECTO"
+
+            self._set_state(NavState.ADVANCING)
+            log.info(
+                "[%s] robot=(%d,%d) target=(%d,%d) dist=%.0fpx%s "
+                "| heading=%+.0f° tgt=%+.0f° err=%+.1f° | %s",
+                mode,
+                rx, ry, target_det.center_x, target_det.center_y, dist, proximity,
+                math.degrees(self._heading), math.degrees(angle_to_target),
+                angle_err_deg, mode,
+            )
+            time.sleep(0.05)
 
         self.robot.stop()
         return False
