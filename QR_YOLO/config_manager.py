@@ -38,7 +38,7 @@ DEFAULT_NAV: Dict = {
     "search_power": 25,      # potencia durante búsqueda giratoria
     "steer_gain": 0.5,       # 0=recto siempre, 1=máxima corrección
     "steer_invert": 1,       # 1=normal, -1=invertir si los motores están al revés
-    "heading_offset_deg": 0, # compensación angular heading del QR (calibrar si se desvía)
+    "heading_offset_deg": 90, # ángulo entre arista QR y dirección adelante del robot
     "lost_debounce": 6,      # frames sin ver algún QR antes de activar búsqueda
     "arrival_debounce": 4,   # frames cerca para confirmar llegada
     "return_after_delivery": True,

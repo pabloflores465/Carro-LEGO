@@ -231,29 +231,41 @@ class Navigator:
 
             arrival_streak = 0
 
-            # ── Control proporcional: dx relativo como error lateral ─────────
+            # ── Calcular corrección usando heading del QR ─────────────────────
             #
-            # No dependemos del heading del QR (impreciso por polígono pyzbar).
-            # En su lugar usamos control proporcional sobre la posición relativa
-            # del target respecto al robot en el frame cenital:
+            # Con cámara cenital necesitamos la orientación del robot para saber
+            # si el target está a su derecha o izquierda.
             #
-            #   dx > 0  →  target a la derecha  →  curvar derecha
-            #   dx < 0  →  target a la izquierda →  curvar izquierda
+            # _qr_heading() devuelve el ángulo de la arista [0]→[1] del polígono.
+            # Esa arista es PERPENDICULAR a la dirección "adelante" del robot,
+            # por eso el offset por defecto es 90°.
             #
-            # La magnitud de la corrección se escala con la distancia:
-            #   - lejos  → corrección fuerte
-            #   - cerca  → corrección fina (evita oscilación)
-            #
-            lateral_error = dx / max(dist, 1)        # normalizado a [-1, +1]
+            angle_to_target = math.atan2(dy, dx)
+            robot_heading   = _qr_heading(robot_det)
+
+            if robot_heading is None:
+                # Sin polígono: no podemos determinar orientación.
+                # Girar en sitio hasta encontrar el QR con polígono.
+                self._set_state(NavState.SEARCHING)
+                self.robot.steer(0, self.config.search_power)
+                time.sleep(0.05)
+                continue
+
+            # Dirección "adelante" del robot = heading del QR + offset
+            forward = robot_heading + math.radians(self.config.heading_offset_deg)
+
+            # Ángulo entre "adelante del robot" y "dirección al target"
+            # Normalizado a [-π, π]: positivo = target a la derecha
+            angle_err = _angle_diff(angle_to_target, forward)
 
             # Gain adaptativo: más agresivo lejos, más suave cerca
-            dist_ratio = min(1.0, dist / 400)         # 1.0 lejos, ~0.3 cerca
-            adaptive_gain = self.config.steer_gain * (0.4 + 0.6 * dist_ratio)
+            dist_ratio = min(1.0, dist / 400)
+            adaptive_gain = self.config.steer_gain * (0.3 + 0.7 * dist_ratio)
 
-            steering = lateral_error * adaptive_gain * self.config.steer_invert
+            steering = (angle_err / math.pi) * adaptive_gain
 
-            # Clamp steering para evitar giros bruscos
-            max_steer = 0.4                           # máximo 40% diferencial
+            # Clamp: máximo 40% diferencial para evitar giros bruscos
+            max_steer = 0.4
             steering = max(-max_steer, min(max_steer, steering))
 
             base  = self.config.advance_power
@@ -262,9 +274,10 @@ class Navigator:
             right_p = max(min_p, min(100, int(base * (1.0 - steering))))
 
             self._set_state(NavState.ADVANCING)
-            log.debug(
-                "dist=%.0fpx  lateral=%+.2f  gain=%.2f  steer=%+.2f  L=%d R=%d",
-                dist, lateral_error, adaptive_gain, steering, left_p, right_p,
+            log.info(
+                "dist=%.0fpx  fwd=%+.0f°  tgt=%+.0f°  err=%+.1f°  steer=%+.2f  L=%d R=%d",
+                dist, math.degrees(forward), math.degrees(angle_to_target),
+                math.degrees(angle_err), steering, left_p, right_p,
             )
 
             # B=rueda derecha recibe right_p, C=rueda izquierda recibe left_p
