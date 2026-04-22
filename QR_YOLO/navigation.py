@@ -189,6 +189,8 @@ class Navigator:
         self._frame_cb   = frame_callback
         self._state      = NavState.IDLE
         self._running    = False
+        self._heading    = None       # heading suavizado (rad)
+        self._positions: list = []    # historial de (x, y) para derivar heading
 
     @property
     def state(self) -> NavState:
@@ -214,8 +216,8 @@ class Navigator:
         lost_streak    = 0
         arrival_streak = 0
         search_frames  = 0
-        last_pos       = None   # (x, y) del robot en el frame anterior
-        heading        = None   # heading derivado del movimiento
+        self._positions = []
+        self._heading   = None
 
         while self._running:
             # ── Captura ───────────────────────────────────────────────────────
@@ -243,7 +245,7 @@ class Navigator:
 
             # ── Alguno no visible → PARAR inmediatamente ──────────────────────
             if robot_det is None or target_det is None:
-                self.robot.stop()                       # ← parar al perder QR
+                self.robot.stop()
                 lost_streak   += 1
                 arrival_streak = 0
 
@@ -264,10 +266,13 @@ class Navigator:
                             ", ".join(missing), search_frames)
 
                 self._set_state(NavState.SEARCHING)
-                # Girar despacio en sitio hasta reencontrar QR
+                # Limpiar historial: posiciones anteriores ya no son válidas
+                self._positions = []
+                self._heading = None
+                # Giro en sitio: motor izq adelante, der atrás (o viceversa)
                 p = self.config.search_power
                 self.robot.steer(p, -p)
-                time.sleep(0.10)
+                time.sleep(0.15)
                 self.robot.stop()
                 time.sleep(0.10)
                 continue
@@ -282,33 +287,52 @@ class Navigator:
             dist = math.sqrt(dx * dx + dy * dy)
             angle_to_target = math.atan2(dy, dx)
 
-            # ── Derivar heading del MOVIMIENTO real del robot ─────────────────
-            # No confiamos en el polígono del QR (inestable).
-            # En su lugar, miramos hacia dónde se movió el robot entre frames.
+            # ── Derivar heading estable desde ventana de posiciones ───────────
+            # El desplazamiento frame-a-frame es demasiado ruidoso (5px con ±3px
+            # de error de detección). Solución: usar las últimas N posiciones
+            # y calcular el vector desde la más antigua a la más reciente.
             rx, ry = robot_det.center_x, robot_det.center_y
-            if last_pos is not None:
-                mx = rx - last_pos[0]
-                my = ry - last_pos[1]
-                move_dist = math.sqrt(mx * mx + my * my)
-                if move_dist > 3:  # robot realmente se movió
-                    heading = math.atan2(my, mx)
-            last_pos = (rx, ry)
+            self._positions.append((rx, ry))
+            # Mantener ventana de 8 posiciones (~0.4s a 20fps)
+            if len(self._positions) > 8:
+                self._positions.pop(0)
 
-            if heading is None:
-                # Primeros frames: aún no hay movimiento medible.
-                # Asumimos que el robot apunta hacia el target y avanzamos
-                # recto hasta poder derivar heading del movimiento.
-                log.info("[ADVANCING] derivando heading...  robot=(%d,%d) target=(%d,%d) dist=%.0fpx",
-                         rx, ry, target_det.center_x, target_det.center_y, dist)
+            new_heading = None
+            if len(self._positions) >= 4:
+                # Vector desde la posición más antigua a la más reciente
+                ox, oy = self._positions[0]
+                nx, ny = self._positions[-1]
+                move_dx = nx - ox
+                move_dy = ny - oy
+                move_dist = math.sqrt(move_dx * move_dx + move_dy * move_dy)
+
+                if move_dist > 15:  # al menos 15px de desplazamiento real
+                    new_heading = math.atan2(move_dy, move_dx)
+
+            if new_heading is not None:
+                if self._heading is None:
+                    self._heading = new_heading
+                else:
+                    # Suavizado EMA angular: 70% anterior + 30% nuevo
+                    diff = _angle_diff(new_heading, self._heading)
+                    self._heading = self._heading + 0.3 * diff
+                    # Normalizar a [-π, π]
+                    while self._heading > math.pi:
+                        self._heading -= 2 * math.pi
+                    while self._heading < -math.pi:
+                        self._heading += 2 * math.pi
+
+            if self._heading is None:
+                # Sin heading fiable aún: avanzar recto hacia el target
                 self._set_state(NavState.ADVANCING)
+                log.info("[ADVANCING] esperando movimiento... robot=(%d,%d) target=(%d,%d) dist=%.0fpx",
+                         rx, ry, target_det.center_x, target_det.center_y, dist)
                 self.robot.steer(self.config.advance_power, self.config.advance_power)
                 time.sleep(0.05)
                 continue
 
             # ── Steering basado en heading real ───────────────────────────────
-            # angle_err > 0: target a la derecha → curvar derecha
-            # angle_err < 0: target a la izquierda → curvar izquierda
-            angle_err = _angle_diff(angle_to_target, heading)
+            angle_err = _angle_diff(angle_to_target, self._heading)
 
             # Gain adaptativo: más agresivo lejos, suave cerca
             dist_ratio = min(1.0, dist / 400)
@@ -327,7 +351,7 @@ class Navigator:
                 "| heading=%+.0f° tgt=%+.0f° err=%+.1f° steer=%.3f L=%d R=%d",
                 rx, ry, target_det.center_x, target_det.center_y,
                 dx, dy, dist,
-                math.degrees(heading), math.degrees(angle_to_target),
+                math.degrees(self._heading), math.degrees(angle_to_target),
                 math.degrees(angle_err), steering, left_p, right_p,
             )
 
