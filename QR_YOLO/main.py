@@ -149,6 +149,8 @@ class App:
             return_after_delivery = self.config.get_nav("return_after_delivery"),
             max_search_frames     = 300,
         )
+        # Nota: heading_offset_deg ya no se usa — el heading se deriva del
+        # movimiento real del robot entre frames consecutivos.
 
         self.navigator = Navigator(
             camera           = self.ui.camera,

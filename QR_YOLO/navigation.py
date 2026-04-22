@@ -55,7 +55,6 @@ class NavigationConfig:
     search_power: int         = 25     # potencia durante búsqueda giratoria
     steer_gain: float         = 0.5    # 0=recto siempre, 1=máxima corrección; ajustar si gira mucho
     steer_invert: int         = 1      # 1=normal, -1=invertir si los motores están al revés
-    heading_offset_deg: float = 0      # compensación angular al heading del QR (grados)
     lost_debounce: int        = 6      # frames sin ver algún QR antes de activar búsqueda
     arrival_debounce: int     = 4      # frames consecutivos cerca para confirmar llegada
     return_after_delivery: bool = True
@@ -215,6 +214,8 @@ class Navigator:
         lost_streak    = 0
         arrival_streak = 0
         search_frames  = 0
+        last_pos       = None   # (x, y) del robot en el frame anterior
+        heading        = None   # heading derivado del movimiento
 
         while self._running:
             # ── Captura ───────────────────────────────────────────────────────
@@ -240,8 +241,9 @@ class Navigator:
                 except Exception:
                     pass
 
-            # ── Alguno no visible ─────────────────────────────────────────────
+            # ── Alguno no visible → PARAR inmediatamente ──────────────────────
             if robot_det is None or target_det is None:
+                self.robot.stop()                       # ← parar al perder QR
                 lost_streak   += 1
                 arrival_streak = 0
 
@@ -252,20 +254,25 @@ class Navigator:
                 search_frames += 1
                 if search_frames > self.config.max_search_frames:
                     log.error("Timeout: no se ven %s y/o %s", robot_qr, target_qr)
-                    self.robot.stop()
                     self._set_state(NavState.ERROR)
                     return False
 
                 missing = []
                 if robot_det  is None: missing.append(robot_qr)
                 if target_det is None: missing.append(target_qr)
-                log.warning("No visible: %s — girando a buscar (frame %d)", missing, search_frames)
+                log.warning("No visible: %s — girando a buscar (frame %d)",
+                            ", ".join(missing), search_frames)
 
                 self._set_state(NavState.SEARCHING)
-                self.robot.steer(0, self.config.search_power)
-                time.sleep(0.05)
+                # Girar despacio en sitio hasta reencontrar QR
+                p = self.config.search_power
+                self.robot.steer(p, -p)
+                time.sleep(0.10)
+                self.robot.stop()
+                time.sleep(0.10)
                 continue
 
+            # ── QR visible: resetear contadores ───────────────────────────────
             lost_streak   = 0
             search_frames = 0
 
@@ -273,61 +280,41 @@ class Navigator:
             dx = target_det.center_x - robot_det.center_x
             dy = target_det.center_y - robot_det.center_y
             dist = math.sqrt(dx * dx + dy * dy)
+            angle_to_target = math.atan2(dy, dx)
 
-            # ── Llegada ───────────────────────────────────────────────────────
-            if dist <= self.config.arrival_px:
-                arrival_streak += 1
-                if arrival_streak < self.config.arrival_debounce:
-                    # Avanzar lento mientras confirma llegada
-                    slow_p = max(20, self.config.advance_power // 3)
-                    self.robot.steer(slow_p, slow_p)
-                    time.sleep(0.05)
-                    continue
+            # ── Derivar heading del MOVIMIENTO real del robot ─────────────────
+            # No confiamos en el polígono del QR (inestable).
+            # En su lugar, miramos hacia dónde se movió el robot entre frames.
+            rx, ry = robot_det.center_x, robot_det.center_y
+            if last_pos is not None:
+                mx = rx - last_pos[0]
+                my = ry - last_pos[1]
+                move_dist = math.sqrt(mx * mx + my * my)
+                if move_dist > 3:  # robot realmente se movió
+                    heading = math.atan2(my, mx)
+            last_pos = (rx, ry)
 
-                self.robot.stop()
-                self._set_state(NavState.ARRIVING)
-                tacho = self.robot.get_tacho()
-                log.info("✅ Llegó a %s  dist=%.0fpx  tacho=%d°", target_qr, dist, tacho)
-
-                self._set_state(NavState.DELIVERING)
-                self.robot.release_payload(
-                    degrees=self.config.tilt_degrees,
-                    power=self.config.tilt_power,
-                )
-
-                if self.config.return_after_delivery:
-                    self._set_state(NavState.RETURNING)
-                    self.robot.reverse_distance(tacho, self.config.advance_power)
-
-                self._set_state(NavState.DONE)
-                self._running = False
-                log.info("Misión completada.")
-                return True
-
-            arrival_streak = 0
-
-            # ── Calcular corrección usando heading del QR ─────────────────────
-            robot_heading = _qr_heading(robot_det)
-            robot_has_heading = robot_heading is not None
-
-            if not robot_has_heading:
-                # Sin polígono: no podemos determinar orientación.
-                log.debug("Sin polígono QR — no se puede calcular heading")
-                self._set_state(NavState.SEARCHING)
-                self.robot.steer(0, self.config.search_power)
+            if heading is None:
+                # Primeros frames: aún no hay movimiento medible.
+                # Asumimos que el robot apunta hacia el target y avanzamos
+                # recto hasta poder derivar heading del movimiento.
+                log.info("[ADVANCING] derivando heading...  robot=(%d,%d) target=(%d,%d) dist=%.0fpx",
+                         rx, ry, target_det.center_x, target_det.center_y, dist)
+                self._set_state(NavState.ADVANCING)
+                self.robot.steer(self.config.advance_power, self.config.advance_power)
                 time.sleep(0.05)
                 continue
 
-            angle_to_target = math.atan2(dy, dx)
-            forward = robot_heading + math.radians(self.config.heading_offset_deg)
-            angle_err = _angle_diff(angle_to_target, forward)
+            # ── Steering basado en heading real ───────────────────────────────
+            # angle_err > 0: target a la derecha → curvar derecha
+            # angle_err < 0: target a la izquierda → curvar izquierda
+            angle_err = _angle_diff(angle_to_target, heading)
 
-            # Gain adaptativo: más agresivo lejos, más suave cerca
+            # Gain adaptativo: más agresivo lejos, suave cerca
             dist_ratio = min(1.0, dist / 400)
             adaptive_gain = self.config.steer_gain * (0.3 + 0.7 * dist_ratio)
-            steering = (angle_err / math.pi) * adaptive_gain
-            max_steer = 0.4
-            steering = max(-max_steer, min(max_steer, steering))
+            steering = (angle_err / math.pi) * adaptive_gain * self.config.steer_invert
+            steering = max(-0.4, min(0.4, steering))
 
             base  = self.config.advance_power
             min_p = self.config.min_power
@@ -335,22 +322,13 @@ class Navigator:
             right_p = max(min_p, min(100, int(base * (1.0 - steering))))
 
             self._set_state(NavState.ADVANCING)
-
-            # ── LOG DETALLADO: TODOS los ángulos y coordenadas ────────────────
             log.info(
-                "[%s] robot=(%d,%d) target=(%d,%d) dx=%+d dy=%+d dist=%.0fpx "
-                "| raw_head=%+.0f° offset=%+.0f° forward=%+.0f° tgt_angle=%+.0f° err=%+.1f° "
-                "| steer=%.3f L=%d R=%d",
-                self._state.name,
-                robot_det.center_x, robot_det.center_y,
-                target_det.center_x, target_det.center_y,
+                "[ADVANCING] robot=(%d,%d) target=(%d,%d) dx=%+d dy=%+d dist=%.0fpx "
+                "| heading=%+.0f° tgt=%+.0f° err=%+.1f° steer=%.3f L=%d R=%d",
+                rx, ry, target_det.center_x, target_det.center_y,
                 dx, dy, dist,
-                math.degrees(robot_heading),
-                self.config.heading_offset_deg,
-                math.degrees(forward),
-                math.degrees(angle_to_target),
-                math.degrees(angle_err),
-                steering, left_p, right_p,
+                math.degrees(heading), math.degrees(angle_to_target),
+                math.degrees(angle_err), steering, left_p, right_p,
             )
 
             self.robot.steer(left_p, right_p)
@@ -364,8 +342,8 @@ class Navigator:
             return
         log.info("Nav: %s → %s", self._state.name, state.name)
         self._state = state
-        if self._cb:
+        if self._status_cb:
             try:
-                self._cb(state)
+                self._status_cb(state)
             except Exception:
                 pass
