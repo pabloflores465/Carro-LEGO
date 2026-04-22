@@ -218,6 +218,7 @@ class Navigator:
         search_frames  = 0
         self._positions = []
         self._heading   = None
+        last_dist      = None   # para detectar si se acerca o aleja
 
         while self._running:
             # ── Captura ───────────────────────────────────────────────────────
@@ -269,7 +270,7 @@ class Navigator:
                 # Limpiar historial: posiciones anteriores ya no son válidas
                 self._positions = []
                 self._heading = None
-                # Giro en sitio: motor izq adelante, der atrás (o viceversa)
+                # Giro en sitio: diferencial opuesto
                 p = self.config.search_power
                 self.robot.steer(p, -p)
                 time.sleep(0.15)
@@ -287,76 +288,106 @@ class Navigator:
             dist = math.sqrt(dx * dx + dy * dy)
             angle_to_target = math.atan2(dy, dx)
 
+            # ── Detectar si se acerca o se aleja ─────────────────────────────
+            proximity = ""
+            if last_dist is not None:
+                delta = dist - last_dist
+                if delta > 5:
+                    proximity = " [⚠ ALEJÁNDOSE]"
+                elif delta < -5:
+                    proximity = " [✓ ACERCÁNDOSE]"
+            last_dist = dist
+
             # ── Derivar heading estable desde ventana de posiciones ───────────
-            # El desplazamiento frame-a-frame es demasiado ruidoso (5px con ±3px
-            # de error de detección). Solución: usar las últimas N posiciones
-            # y calcular el vector desde la más antigua a la más reciente.
             rx, ry = robot_det.center_x, robot_det.center_y
             self._positions.append((rx, ry))
-            # Mantener ventana de 8 posiciones (~0.4s a 20fps)
             if len(self._positions) > 8:
                 self._positions.pop(0)
 
             new_heading = None
             if len(self._positions) >= 4:
-                # Vector desde la posición más antigua a la más reciente
                 ox, oy = self._positions[0]
                 nx, ny = self._positions[-1]
                 move_dx = nx - ox
                 move_dy = ny - oy
                 move_dist = math.sqrt(move_dx * move_dx + move_dy * move_dy)
 
-                if move_dist > 15:  # al menos 15px de desplazamiento real
+                if move_dist > 15:
                     new_heading = math.atan2(move_dy, move_dx)
 
             if new_heading is not None:
                 if self._heading is None:
                     self._heading = new_heading
                 else:
-                    # Suavizado EMA angular: 70% anterior + 30% nuevo
                     diff = _angle_diff(new_heading, self._heading)
                     self._heading = self._heading + 0.3 * diff
-                    # Normalizar a [-π, π]
                     while self._heading > math.pi:
                         self._heading -= 2 * math.pi
                     while self._heading < -math.pi:
                         self._heading += 2 * math.pi
 
             if self._heading is None:
-                # Sin heading fiable aún: avanzar recto hacia el target
                 self._set_state(NavState.ADVANCING)
-                log.info("[ADVANCING] esperando movimiento... robot=(%d,%d) target=(%d,%d) dist=%.0fpx",
-                         rx, ry, target_det.center_x, target_det.center_y, dist)
+                log.info("[ADVANCING] esperando movimiento... robot=(%d,%d) target=(%d,%d) dist=%.0fpx%s",
+                         rx, ry, target_det.center_x, target_det.center_y, dist, proximity)
                 self.robot.steer(self.config.advance_power, self.config.advance_power)
                 time.sleep(0.05)
                 continue
 
-            # ── Steering basado en heading real ───────────────────────────────
+            # ── Calcular error angular ────────────────────────────────────────
             angle_err = _angle_diff(angle_to_target, self._heading)
+            angle_err_deg = math.degrees(angle_err)
 
-            # Gain adaptativo: más agresivo lejos, suave cerca
-            dist_ratio = min(1.0, dist / 400)
-            adaptive_gain = self.config.steer_gain * (0.3 + 0.7 * dist_ratio)
-            steering = (angle_err / math.pi) * adaptive_gain * self.config.steer_invert
-            steering = max(-0.4, min(0.4, steering))
+            # ── Estrategia dual ───────────────────────────────────────────────
+            # Si el error es grande (> 60°): girar en sitio hasta alinear.
+            # Steering mientras avanza no corrige errores grandes porque el
+            # robot físicamente avanza en la dirección equivocada.
+            TURN_THRESHOLD = math.radians(60)
 
-            base  = self.config.advance_power
-            min_p = self.config.min_power
-            left_p  = max(min_p, min(100, int(base * (1.0 + steering))))
-            right_p = max(min_p, min(100, int(base * (1.0 - steering))))
+            if abs(angle_err) > TURN_THRESHOLD:
+                # Giro en sitio hacia el target
+                self._set_state(NavState.ADVANCING)
+                turn_power = self.config.advance_power
+                if angle_err > 0:
+                    # Target a la derecha → girar derecha
+                    self.robot.steer(turn_power, -turn_power)
+                    direction = "GIRAR DERECHA"
+                else:
+                    # Target a la izquierda → girar izquierda
+                    self.robot.steer(-turn_power, turn_power)
+                    direction = "GIRAR IZQUIERDA"
 
-            self._set_state(NavState.ADVANCING)
-            log.info(
-                "[ADVANCING] robot=(%d,%d) target=(%d,%d) dx=%+d dy=%+d dist=%.0fpx "
-                "| heading=%+.0f° tgt=%+.0f° err=%+.1f° steer=%.3f L=%d R=%d",
-                rx, ry, target_det.center_x, target_det.center_y,
-                dx, dy, dist,
-                math.degrees(self._heading), math.degrees(angle_to_target),
-                math.degrees(angle_err), steering, left_p, right_p,
-            )
+                log.info(
+                    "[%s] robot=(%d,%d) target=(%d,%d) dist=%.0fpx%s "
+                    "| heading=%+.0f° tgt=%+.0f° err=%+.1f° | %s",
+                    self._state.name,
+                    rx, ry, target_det.center_x, target_det.center_y, dist, proximity,
+                    math.degrees(self._heading), math.degrees(angle_to_target),
+                    angle_err_deg, direction,
+                )
+                time.sleep(0.05)
+            else:
+                # Error pequeño: avanzar con corrección diferencial suave
+                dist_ratio = min(1.0, dist / 400)
+                adaptive_gain = self.config.steer_gain * (0.3 + 0.7 * dist_ratio)
+                steering = (angle_err / math.pi) * adaptive_gain * self.config.steer_invert
+                steering = max(-0.3, min(0.3, steering))  # clamp suave
 
-            self.robot.steer(left_p, right_p)
-            time.sleep(0.05)
+                base = self.config.advance_power
+                min_p = self.config.min_power
+                left_p  = max(min_p, min(100, int(base * (1.0 + steering))))
+                right_p = max(min_p, min(100, int(base * (1.0 - steering))))
+
+                self._set_state(NavState.ADVANCING)
+                log.info(
+                    "[AVANZAR] robot=(%d,%d) target=(%d,%d) dist=%.0fpx%s "
+                    "| heading=%+.0f° tgt=%+.0f° err=%+.1f° steer=%.3f L=%d R=%d",
+                    rx, ry, target_det.center_x, target_det.center_y, dist, proximity,
+                    math.degrees(self._heading), math.degrees(angle_to_target),
+                    angle_err_deg, steering, left_p, right_p,
+                )
+                self.robot.steer(left_p, right_p)
+                time.sleep(0.05)
 
         self.robot.stop()
         return False
