@@ -270,8 +270,8 @@ class Navigator:
                 # Limpiar historial: posiciones anteriores ya no son válidas
                 self._positions = []
                 self._heading = None
-                # Giro en sitio: diferencial opuesto con más potencia
-                p = max(self.config.search_power, 40)
+                # Giro en sitio: diferencial opuesto
+                p = max(self.config.search_power, 30)
                 self.robot.steer(p, -p)
                 time.sleep(0.12)
                 self.robot.stop()
@@ -340,33 +340,28 @@ class Navigator:
             abs_err = abs(angle_err)
 
             # ── Estrategia de 3 niveles ───────────────────────────────────────
-            # El robot rota ~40°/s con power=55. Necesitamos ser más agresivos
-            # para alinear antes de perder QR.
+            # Nivel 1: error > 60° → giro en sitio (power 60)
+            # Nivel 2: error 15-60° → avanzar + girar con corrección media
+            # Nivel 3: error < 15° → avanzar con corrección suave
             #
-            # Nivel 1: error > 90° → giro agresivo en sitio (power 85)
-            # Nivel 2: error 30-90° → avanzar + girar con corrección fuerte
-            # Nivel 3: error < 30° → avanzar con corrección suave
-            #
-            if abs_err > math.radians(90):
-                # Giro agresivo en sitio
-                turn_power = 85
+            if abs_err > math.radians(60):
+                # Giro en sitio suave
+                turn_power = 60
                 if angle_err > 0:
                     self.robot.steer(turn_power, -turn_power)
                 else:
                     self.robot.steer(-turn_power, turn_power)
                 mode = "GIRO"
 
-            elif abs_err > math.radians(30):
-                # Avanzar mientras gira: corrección fuerte pero sin perder avance
-                steer_amount = min(0.6, (abs_err / math.pi) * 1.2)
+            elif abs_err > math.radians(15):
+                # Avanzar mientras gira: corrección media
+                steer_amount = min(0.4, (abs_err / math.pi) * 0.8)
                 if angle_err > 0:
-                    # Derecha: rueda izq más rápida
                     left_p = self.config.advance_power
-                    right_p = max(20, int(self.config.advance_power * (1.0 - steer_amount)))
+                    right_p = max(25, int(self.config.advance_power * (1.0 - steer_amount)))
                 else:
-                    # Izquierda: rueda der más rápida
                     right_p = self.config.advance_power
-                    left_p = max(20, int(self.config.advance_power * (1.0 - steer_amount)))
+                    left_p = max(25, int(self.config.advance_power * (1.0 - steer_amount)))
                 self.robot.steer(left_p, right_p)
                 mode = "CURVA"
 
