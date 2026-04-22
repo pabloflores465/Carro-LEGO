@@ -36,6 +36,9 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Callable, Optional
 
+import cv2
+import numpy as np
+
 from vision import Camera, QRDetector, QRDetection
 from robot_controller import RobotController
 
@@ -75,6 +78,7 @@ class NavState(Enum):
 
 
 StatusCallback = Callable[[NavState], None]
+FrameCallback = Callable[[np.ndarray], None]  # frames anotados para la UI
 
 
 # ── Helpers geométricos ───────────────────────────────────────────────────────
@@ -102,6 +106,64 @@ def _angle_diff(a: float, b: float) -> float:
     return d
 
 
+# ── Dibujar debug en frame ────────────────────────────────────────────────────
+
+def _annotate_frame(
+    frame: np.ndarray,
+    robot_det: Optional[QRDetection],
+    target_det: Optional[QRDetection],
+    robot_label: str,
+    target_label: str,
+) -> np.ndarray:
+    """Dibuja coordenadas, vectores y heading en el frame para debug visual."""
+    img = frame
+
+    if robot_det:
+        rx, ry = robot_det.center_x, robot_det.center_y
+        # Centro del robot: cruz verde
+        cv2.circle(img, (rx, ry), 10, (0, 255, 0), 2)
+        cv2.drawMarker(img, (rx, ry), (0, 255, 0), cv2.MARKER_CROSS, 20, 2)
+        cv2.putText(img, robot_label, (rx + 15, ry - 10),
+                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        # Polígono del QR del robot
+        if robot_det.polygon and len(robot_det.polygon) >= 4:
+            pts = np.array(robot_det.polygon, np.int32)
+            cv2.polylines(img, [pts], True, (0, 180, 255), 2)
+            # Flecha de heading (arista 0→1)
+            h = _qr_heading(robot_det)
+            if h is not None:
+                arrow_len = 60
+                ex = int(rx + arrow_len * math.cos(h))
+                ey = int(ry + arrow_len * math.sin(h))
+                cv2.arrowedLine(img, (rx, ry), (ex, ey), (0, 180, 255), 3)
+                cv2.putText(img, f"H={math.degrees(h):+.0f}°",
+                            (ex + 5, ey), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 180, 255), 1)
+
+    if target_det:
+        tx, ty = target_det.center_x, target_det.center_y
+        # Centro del target: cruz roja
+        cv2.circle(img, (tx, ty), 10, (0, 0, 255), 2)
+        cv2.drawMarker(img, (tx, ty), (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
+        cv2.putText(img, target_label, (tx + 15, ty - 10),
+                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+    if robot_det and target_det:
+        # Línea robot → target
+        cv2.line(img, (robot_det.center_x, robot_det.center_y),
+                 (target_det.center_x, target_det.center_y), (255, 0, 255), 2)
+        # Texto con distancia y ángulo
+        dx = target_det.center_x - robot_det.center_x
+        dy = target_det.center_y - robot_det.center_y
+        dist = math.sqrt(dx*dx + dy*dy)
+        ang = math.degrees(math.atan2(dy, dx))
+        mx = (robot_det.center_x + target_det.center_x) // 2
+        my = (robot_det.center_y + target_det.center_y) // 2
+        cv2.putText(img, f"d={dist:.0f}px  ∠{ang:.0f}°  dx={dx:+d} dy={dy:+d}",
+                    (mx - 80, my - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+
+    return img
+
+
 # ── Navegador ─────────────────────────────────────────────────────────────────
 
 class Navigator:
@@ -118,14 +180,16 @@ class Navigator:
         robot: RobotController,
         config: NavigationConfig,
         status_callback: Optional[StatusCallback] = None,
+        frame_callback: Optional[FrameCallback] = None,
     ):
-        self.camera   = camera
-        self.detector = detector
-        self.robot    = robot
-        self.config   = config
-        self._cb      = status_callback
-        self._state   = NavState.IDLE
-        self._running = False
+        self.camera      = camera
+        self.detector    = detector
+        self.robot       = robot
+        self.config      = config
+        self._status_cb  = status_callback
+        self._frame_cb   = frame_callback
+        self._state      = NavState.IDLE
+        self._running    = False
 
     @property
     def state(self) -> NavState:
@@ -165,6 +229,17 @@ class Navigator:
             robot_det  = self.detector.detect_content(frame, robot_qr)
             target_det = self.detector.detect_content(frame, target_qr)
 
+            # ── Debug: enviar frame anotado a la UI ───────────────────────────
+            debug_frame = _annotate_frame(
+                frame.copy(), robot_det, target_det,
+                robot_qr, target_qr,
+            )
+            if self._frame_cb:
+                try:
+                    self._frame_cb(debug_frame)
+                except Exception:
+                    pass
+
             # ── Alguno no visible ─────────────────────────────────────────────
             if robot_det is None or target_det is None:
                 lost_streak   += 1
@@ -184,7 +259,7 @@ class Navigator:
                 missing = []
                 if robot_det  is None: missing.append(robot_qr)
                 if target_det is None: missing.append(target_qr)
-                log.debug("No visible: %s — girando a buscar", missing)
+                log.warning("No visible: %s — girando a buscar (frame %d)", missing, search_frames)
 
                 self._set_state(NavState.SEARCHING)
                 self.robot.steer(0, self.config.search_power)
@@ -212,7 +287,7 @@ class Navigator:
                 self.robot.stop()
                 self._set_state(NavState.ARRIVING)
                 tacho = self.robot.get_tacho()
-                log.info("Llegó a %s  dist=%.0fpx  tacho=%d°", target_qr, dist, tacho)
+                log.info("✅ Llegó a %s  dist=%.0fpx  tacho=%d°", target_qr, dist, tacho)
 
                 self._set_state(NavState.DELIVERING)
                 self.robot.release_payload(
@@ -232,39 +307,25 @@ class Navigator:
             arrival_streak = 0
 
             # ── Calcular corrección usando heading del QR ─────────────────────
-            #
-            # Con cámara cenital necesitamos la orientación del robot para saber
-            # si el target está a su derecha o izquierda.
-            #
-            # _qr_heading() devuelve el ángulo de la arista [0]→[1] del polígono.
-            # Esa arista es PERPENDICULAR a la dirección "adelante" del robot,
-            # por eso el offset por defecto es 90°.
-            #
-            angle_to_target = math.atan2(dy, dx)
-            robot_heading   = _qr_heading(robot_det)
+            robot_heading = _qr_heading(robot_det)
+            robot_has_heading = robot_heading is not None
 
-            if robot_heading is None:
+            if not robot_has_heading:
                 # Sin polígono: no podemos determinar orientación.
-                # Girar en sitio hasta encontrar el QR con polígono.
+                log.debug("Sin polígono QR — no se puede calcular heading")
                 self._set_state(NavState.SEARCHING)
                 self.robot.steer(0, self.config.search_power)
                 time.sleep(0.05)
                 continue
 
-            # Dirección "adelante" del robot = heading del QR + offset
+            angle_to_target = math.atan2(dy, dx)
             forward = robot_heading + math.radians(self.config.heading_offset_deg)
-
-            # Ángulo entre "adelante del robot" y "dirección al target"
-            # Normalizado a [-π, π]: positivo = target a la derecha
             angle_err = _angle_diff(angle_to_target, forward)
 
             # Gain adaptativo: más agresivo lejos, más suave cerca
             dist_ratio = min(1.0, dist / 400)
             adaptive_gain = self.config.steer_gain * (0.3 + 0.7 * dist_ratio)
-
             steering = (angle_err / math.pi) * adaptive_gain
-
-            # Clamp: máximo 40% diferencial para evitar giros bruscos
             max_steer = 0.4
             steering = max(-max_steer, min(max_steer, steering))
 
@@ -274,14 +335,25 @@ class Navigator:
             right_p = max(min_p, min(100, int(base * (1.0 - steering))))
 
             self._set_state(NavState.ADVANCING)
+
+            # ── LOG DETALLADO: TODOS los ángulos y coordenadas ────────────────
             log.info(
-                "dist=%.0fpx  fwd=%+.0f°  tgt=%+.0f°  err=%+.1f°  steer=%+.2f  L=%d R=%d",
-                dist, math.degrees(forward), math.degrees(angle_to_target),
-                math.degrees(angle_err), steering, left_p, right_p,
+                "[%s] robot=(%d,%d) target=(%d,%d) dx=%+d dy=%+d dist=%.0fpx "
+                "| raw_head=%+.0f° offset=%+.0f° forward=%+.0f° tgt_angle=%+.0f° err=%+.1f° "
+                "| steer=%.3f L=%d R=%d",
+                self._state.name,
+                robot_det.center_x, robot_det.center_y,
+                target_det.center_x, target_det.center_y,
+                dx, dy, dist,
+                math.degrees(robot_heading),
+                self.config.heading_offset_deg,
+                math.degrees(forward),
+                math.degrees(angle_to_target),
+                math.degrees(angle_err),
+                steering, left_p, right_p,
             )
 
-            # B=rueda derecha recibe right_p, C=rueda izquierda recibe left_p
-            self.robot.steer(right_p, left_p)
+            self.robot.steer(left_p, right_p)
             time.sleep(0.05)
 
         self.robot.stop()

@@ -156,6 +156,7 @@ class App:
             robot            = self.robot,
             config           = nav_cfg,
             status_callback  = self._on_nav_state,
+            frame_callback   = self.ui.update_frame,
         )
 
         # Guardar robot_qr para pasarlo al navigate_to

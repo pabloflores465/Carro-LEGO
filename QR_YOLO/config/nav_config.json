@@ -6,7 +6,7 @@
   "search_power": 25,
   "steer_gain": 0.5,
   "steer_invert": 1,
-  "heading_offset_deg": 90,
+  "heading_offset_deg": 90.0,
   "lost_debounce": 6,
   "arrival_debounce": 4,
   "return_after_delivery": true,
